@@ -1,0 +1,161 @@
+## Created by Sam Lee( xili@redhat.com), we case use this yaml to setup PXE boot host.
+
+- name: Auto config KVM kickstart host
+  become: true
+  hosts: all
+  tasks:
+  - name: step 1/16 Install required tools httpd, tftp-server, dhcp-server, syslinux, mod_ssl and openssl
+    yum:
+      name:
+        - httpd
+        - tftp-server
+        - dhcp-server
+        - syslinux
+        - mod_ssl
+        - openssl
+      state: latest
+
+  - name: step 2/16 Create required directory /mnt/sdb/www/html
+    file:
+      path: /mnt/sdb/www/html
+      state: directory
+
+  - name: step 3/16 Configure http to change documentation root directory
+    replace:
+      path: /etc/httpd/conf/httpd.conf
+      regexp: '\/var\/www\/'
+      replace: "/mnt/sdb/www/"
+
+  - name: step 4/16 Configure /etc/httpd/conf.d/ssl.conf
+    replace:
+      path: /etc/httpd/conf.d/ssl.conf
+      regexp: 'localhost'
+      replace: 'server'
+
+  - name: step 5/16 Generate cert key for ssl
+    openssl_privatekey:
+      path: /etc/pki/tls/private/server.key
+      size: 2048
+
+  - name: step 6/16 Generate cert csr for ssl
+    openssl_csr:
+      path: /etc/pki/tls/private/server.csr
+      privatekey_path:  /etc/pki/tls/private/server.key
+
+  - name: step 7/16 Generate cert crt for ssl
+    openssl_certificate:
+      path: /etc/pki/tls/certs/server.crt
+      privatekey_path: /etc/pki/tls/private/server.key
+      csr_path: /etc/pki/tls/private/server.csr
+      provider: selfsigned
+
+  - name: step 8/16 config tftp-server
+    replace:
+      path: /usr/lib/systemd/system/tftp.service
+      regexp: '\/var\/lib\/tftpboot\/'
+      replace: 'server'
+
+  - name: step 9/16 configure /etc/dhcp/dhcpd.conf file
+    blockinfile:
+      path: /etc/dhcp/dhcpd.conf
+      block: |
+          default-lease-time 600;
+          max-lease-time 7200;
+          option space pxelinux;
+          option pxelinux.magic code 208 = string;
+          option pxelinux.configfile code 209 = text;
+          option pxelinux.pathprefix code 210 = text;
+          option pxelinux.reboottime code 211 = unsigned integer 32;
+          option architecture-type code 93 = unsigned integer 16;
+
+          subnet 99.99.99.0 netmask 255.255.255.0 {
+            range 99.99.99.2 99.99.99.250;
+          	class "pxeclients" {
+          	  match if substring (option vendor-class-identifier, 0, 9) = "PXEClient";
+          	  next-server 99.99.99.99;
+
+          	  if option architecture-type = 00:07 {
+          	    filename "BOOTX64.EFI";
+          	  } else {
+          	    filename "pxelinux.0";
+          		}
+            }
+            next-server 99.99.99.99;
+          }
+      create: yes
+
+  - name: step 10/16 restart http, tftp, dhcpd services
+    systemd:
+      name: "{{ item }}"
+      state: started
+      enabled: yes
+    with_items:
+       - httpd
+       - tftp
+       - dhcpd
+
+  - name: step 11/16 generate default kickstart file (can be used as reference)
+    blockinfile:
+      path: /mnt/sdb/www/html/kickstart.cfg
+      block: |
+        lang en_US
+        keyboard us
+        timezone Asia/Shanghai --isUtc
+        rootpw $1$Clh0v2w6$emQ2kfyhmqjoqqCs543bL. --iscrypted
+        poweroff
+        url --url=http://99.99.99.99/rhel82
+        bootloader --location=mbr --append="crashkernel=auto console=tty0 console=ttyS0"
+        zerombr
+        clearpart --all --initlabel
+        autopart --noswap
+        auth --passalgo=sha512 --useshadow
+        selinux --permissive
+        firewall --enabled --http --ftp --ssh
+        firstboot --disable
+        %packages
+        @^minimal-environment
+        kexec-tools
+        %end
+      create: yes
+
+  - name: step 12/16 generate grub.cfg file for UEFI (can be used as reference)
+    blockinfile:
+      path: /mnt/sdb/www/html/grub.cfg
+      block: |
+        set timeout=10
+        menuentry 'RHEL 8 install'{
+        linuxefi rhel82/images/pxeboot/vmlinuz ip=dhcp console=ttyS0,115200n8 inst.repo=http://99.99.99.99/rhel82/ inst.stage2=http://99.99.99.99/rhel82 inst.ks=http://99.99.99.99/kickstart.cfg
+        initrdefi rhel82/images/pxeboot/initrd.img
+        }
+      create: yes
+  - name: step 13/16 place the syslinux files to /mnt/sdb/www/html/
+    copy:
+      src: "{{ item }}"
+      dest: /mnt/sdb/www/html/
+    with_items:
+       - /usr/share/syslinux/ldlinux.c32
+       - /usr/share/syslinux/pxelinux.0
+
+  - name: step 14/16 place the grubx64.efiBOOTX64.EFI files to /mnt/sdb/www/html/ (make sure mount the ISO into /mnt/sdb/www/html/rhel82)
+    copy:
+      src: "{{ item }}"
+      dest: /mnt/sdb/www/html/
+    with_items:
+       - /mnt/sdb/www/html/rhel82/EFI/BOOT/BOOTX64.EFI
+       - /mnt/sdb/www/html/rhel82/EFI/BOOT/grubx64.efi
+
+  - name: step 15/16 create direcory /mnt/sdb/www/html/pxelinux.cfg
+    file:
+      path: /mnt/sdb/www/html/pxelinux.cfg
+      state: directory
+      mode: '0755'
+
+  - name: step 16/16 create default file in /mnt/sdb/www/html/pxelinux.cfg/default (can be used as reference)
+    blockinfile:
+      path: /mnt/sdb/www/html/pxelinux.cfg/default
+      block: |
+        DEFAULT linux
+        label linux
+        kernel rhel82/images/pxeboot/vmlinuz
+        append initrd=rhel82/images/pxeboot/initrd.img inst.stage2=http://99.99.99.99/rhel82 inst.ks=http://99.99.99.99/kickstart.cfg
+      create: yes
