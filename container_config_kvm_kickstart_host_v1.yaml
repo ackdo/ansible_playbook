@@ -1,0 +1,128 @@
+---
+- name: Auto config KVM kickstart host
+  become: true
+  hosts: all
+  tasks:
+  - name: step0/13 Install required tools httpd, tftp-server, dhcp-server, syslinux, mod_ssl and openssl
+    yum:
+      name: 
+        - httpd
+        - tftp-server
+        - dhcp-server
+        - syslinux
+        - mod_ssl
+        - openssl
+      state: latest
+
+  - name: step1/13 Create required directory /mnt/sdb/www/html
+    file:
+      path: /mnt/sdb/www/html
+      state: directory
+
+  - name: step2/13 Configure http to change documentation root directory
+    replace:
+      path: /etc/httpd/conf/httpd.conf
+      regexp: '\/var\/www\/'
+      replace: "/mnt/sdb/www/"
+
+  - name: step3/13 Configure /etc/httpd/conf.d/ssl.conf
+    replace:
+      path: /etc/httpd/conf.d/ssl.conf
+      regexp: 'localhost'
+      replace: 'server'
+
+  - name: step4/13 Generate cert key for ssl
+    openssl_privatekey:
+      path: /etc/pki/tls/private/server.key
+      size: 2048
+
+  - name: step5/13 Generate cert csr for ssl
+    openssl_csr:
+      path: /etc/pki/tls/private/server.csr
+      privatekey_path:  /etc/pki/tls/private/server.key
+
+  - name: step6/13 Generate cert crt for ssl
+    openssl_certificate:
+      path: /etc/pki/tls/certs/server.crt
+      privatekey_path: /etc/pki/tls/private/server.key
+      csr_path: /etc/pki/tls/private/server.csr
+      provider: selfsigned
+
+  - name: step7/13 config tftp-server
+    replace:
+      path: /usr/lib/systemd/system/tftp.service
+      regexp: '\/var\/lib\/tftpboot\/'
+      replace: 'server'
+
+  - name: step8/13 configure /etc/dhcp/dhcpd.conf file
+    blockinfile:
+      path: /etc/dhcp/dhcpd.conf
+      block: |
+        default-lease-time 600;
+        max-lease-time 7200;
+
+        subnet 99.99.99.0 netmask 255.255.255.0 {
+          range 99.99.99.2 99.99.99.250;
+          filename "pxelinux.0";
+          next-server 99.99.99.99;
+        }
+      create: yes
+
+  - name: step9/13 restart http, tftp, dhcpd services
+    systemd:
+      name: "{{ item }}"
+      state: started
+      enabled: yes
+    with_items:
+       - httpd
+       - tftp
+       - dhcpd
+
+  - name: step10/13 generate default kickstart file (can be used as reference)
+    blockinfile:
+      path: /mnt/sdb/www/html/kickstart.cfg
+      block: |
+        lang en_US
+        keyboard us
+        timezone Asia/Shanghai --isUtc
+        rootpw $1$Clh0v2w6$emQ2kfyhmqjoqqCs543bL. --iscrypted
+        #platform x86, AMD64, or Intel EM64T
+        poweroff
+        url --url=http://99.99.99.99/rhel82
+        bootloader --location=mbr --append="crashkernel=auto console=tty0 console=ttyS0"
+        zerombr
+        clearpart --all --initlabel
+        part / --fstype=xfs --ondisk=sda --size=1 --grow --maxsize=1000000 --asprimary
+        auth --passalgo=sha512 --useshadow
+        selinux --permissive
+        firewall --enabled --http --ftp --ssh
+        firstboot --disable
+        %packages
+        @^minimal-environment
+        kexec-tools
+        %end
+      create: yes
+
+  - name: step11/13 place the syslinux files to /mnt/sdb/www/html/
+    copy:
+      src: "{{ item }}"
+      dest: /mnt/sdb/www/html/
+    with_items:
+       - /usr/share/syslinux/ldlinux.c32
+       - /usr/share/syslinux/pxelinux.0
+
+  - name: step12/13 create direcory /mnt/sdb/www/html/pxelinux.cfg
+    file:
+      path: /mnt/sdb/www/html/pxelinux.cfg
+      state: directory
+      mode: '0755'
+
+  - name: step13/13 create default file in /mnt/sdb/www/html/pxelinux.cfg/default (can be used as reference)
+    blockinfile:
+      path: /mnt/sdb/www/html/pxelinux.cfg/default
+      block: |
+        DEFAULT linux
+        label linux
+        kernel rhel82/images/pxeboot/vmlinuz
+        append initrd=rhel82/images/pxeboot/initrd.img inst.stage2=http://99.99.99.99/rhel82 inst.ks=http://99.99.99.99/kickstart.cfg
+      create: yes  
